@@ -1,0 +1,126 @@
+import { NextRequest, NextResponse } from 'next/server'
+import fs from 'fs'
+import path from 'path'
+import { getClientIp } from '@/lib/tracking/clientIp'
+import { getGeoInfoFromIp } from '@/lib/tracking/geoInfo'
+import { getUserAgentInfo } from '@/lib/tracking/userAgent'
+
+
+// Path to the JSON log file (created automatically if missing)
+const LOG_FILE_PATH = path.join(process.cwd(), 'email_clicks.json')
+
+
+// Interface for log entry (matching open's structure)
+interface LogEntry {
+  id: number; // Auto-increment per email
+  email: string;
+  offerId: string;
+  ipAdr: string;
+  country: string;
+  city: string;
+  isp: string;
+  device: string;
+  os: string;
+  browser: string;
+  createdAt: string;
+  updatedAt: string;
+  clickedAt: string;
+}
+
+
+// Read logs from file
+function readLogs(): LogEntry[] {
+  try {
+    if (!fs.existsSync(LOG_FILE_PATH)) return [];
+    const data = fs.readFileSync(LOG_FILE_PATH, 'utf-8');
+    return JSON.parse(data) as LogEntry[];
+  } catch (e) {
+    return [];
+  }
+}
+
+
+// Write logs to file
+function writeLogs(logs: LogEntry[]): void {
+  fs.writeFileSync(LOG_FILE_PATH, JSON.stringify(logs, null, 2), 'utf-8');
+}
+
+
+// Get next auto-increment ID for the email
+function getNextId(email: string, logs: LogEntry[]): number {
+  const emailLogs = logs.filter((log) => log.email === email);
+  if (emailLogs.length === 0) return 1;
+  return Math.max(...emailLogs.map((l) => l.id)) + 1;
+}
+
+
+export async function GET(request: NextRequest) {
+  const { searchParams } = new URL(request.url)
+  const email = searchParams.get('email')
+  const offerId = searchParams.get('offerId')
+  
+  if (!email) {
+    return new NextResponse('Missing email query parameter', { status: 400 })
+  }
+  if (!offerId) {
+    return new NextResponse('Missing offerId query parameter', { status: 400 })
+  }
+  
+  // Get client IP and geo info (country, city, isp)
+  const ipAdr = await getClientIp(request);
+  const { country, city, isp } = await getGeoInfoFromIp(ipAdr);
+  
+  // Get user-agent info (device, os, browser)
+  const userAgent = request.headers.get('user-agent') || 'Unknown';
+  const { device, os, browser } = getUserAgentInfo(userAgent);
+  
+  // Read existing logs
+  let logs = readLogs();
+  const now = new Date().toISOString();
+  
+  // Find existing record for this email
+  const existingIndex = logs.findIndex((log) => log.email === email);
+  let logEntry: LogEntry;
+  
+  if (existingIndex === -1) {
+    // New record
+    const id = getNextId(email, logs);
+    logEntry = {
+      id,
+      email,
+      offerId,
+      ipAdr,
+      country,
+      city,
+      isp,
+      device,
+      os,
+      browser,
+      createdAt: now,
+      updatedAt: now,
+      clickedAt: now
+    };
+    logs.push(logEntry);
+  } else {
+    // Update existing record
+    logEntry = { ...logs[existingIndex] };
+    logEntry.id = getNextId(email, logs); // Increment ID for this click
+    logEntry.ipAdr = ipAdr; // Update to latest IP
+    logEntry.country = country; // Update to latest country
+    logEntry.city = city; // Update to latest city
+    logEntry.isp = isp; // Update to latest isp
+    logEntry.device = device; // Update to latest device
+    logEntry.os = os; // Update to latest os
+    logEntry.browser = browser; // Update to latest browser
+    logEntry.offerId = offerId; // Update if needed
+    logEntry.updatedAt = now;
+    logEntry.clickedAt = now;
+    logs[existingIndex] = logEntry;
+  }
+  
+  // Write updated logs
+  writeLogs(logs);
+  
+  // Always redirect to Google
+  return NextResponse.redirect('https://www.google.com', 302);
+}
